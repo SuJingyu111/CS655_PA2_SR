@@ -1,5 +1,4 @@
 import java.util.*;
-import java.io.*;
 
 public class StudentNetworkSimulator extends NetworkSimulator
 {
@@ -97,21 +96,26 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // these variables to send messages error free!  They can only hold
     // state information for A or B.
     // Also add any necessary methods (e.g. checksum of a String)
-    //Variables that I added
-    LinkedList<Packet> flyingBufferA;
-    Queue<String> sendingBufferA;
-    int nextSeq;
-    int windowStart, windowEnd;
-    TreeMap<Integer, Message> receiveBufferB;
-    int expectedSeq;
+    private Queue<Packet> sendingBuffer;
+    private LinkedHashMap<Integer, Packet> flyingBufferA;
+    private HashMap<Integer, Packet> rcvBufferB;
+
+    private int nextSeq;
+    //private int sendWindowStart;
     boolean timerOn;
 
-    private int getDataCheckSum(String data, int number) {
+    private int expectedSeqNum;
+
+    private boolean checkCheckSum(int result, String payload) {
+        return getCheckSum(payload) == result;
+    }
+
+    private int getCheckSum(String payload) {
         int checkSum = 0;
-        for (int i = data.length() - 1; i >= 0; i--) {
-            checkSum += data.charAt(i);
+        for (int i = 0; i < payload.length(); i++) {
+            checkSum += payload.charAt(i);
         }
-        return checkSum + number;
+        return checkSum;
     }
 
     // This is the constructor.  Don't touch!
@@ -137,61 +141,42 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // the receiving upper layer.
     protected void aOutput(Message message)
     {
-        receivedFromLayer5A++;
-        String data = message.getData();
+        receivedCntA++;
+        int seqNum = nextSeq;
+        int ackNum = -1;
+        String payload = message.getData();
+        int checksum = getCheckSum(payload);
+        Packet packet = new Packet(seqNum, ackNum, checksum, payload);
+        nextSeq++;
         if (flyingBufferA.size() >= WindowSize) {
-            sendingBufferA.offer(data);
+            sendingBuffer.offer(packet);
         }
-        else {
-            int start = 0;
-            while (flyingBufferA.size() < WindowSize) {
-                if (!sendingBufferA.isEmpty()) {
-                    origTransmitCntA++;
-                    generateAndSend(sendingBufferA.poll());
+        else{
+            while (flyingBufferA.size() < WindowSize && !sendingBuffer.isEmpty()) {
+                Packet prevPkt = sendingBuffer.poll();
+                origTransmittedCntA++;
+                if (timerOn) {
+                    stopTimer(A);
                 }
-                else {
-                    if (start < data.length()) {
-                        String sendData = data.substring(start, Math.min(start + MAXDATASIZE, data.length()));
-                        origTransmitCntA++;
-                        generateAndSend(sendData);
-                        start = Math.min(start + MAXDATASIZE, data.length());
-                    }
-                    else {
-                        break;
-                    }
+                toLayer3(A, prevPkt);
+                startTimer(A, RxmtInterval);
+                timerOn = true;
+                flyingBufferA.put(prevPkt.getSeqnum(), prevPkt);
+            }
+            if (flyingBufferA.size() < WindowSize) {
+                origTransmittedCntA++;
+                if (timerOn) {
+                    stopTimer(A);
                 }
+                toLayer3(A, packet);
+                startTimer(A, RxmtInterval);
+                timerOn = true;
+                flyingBufferA.put(seqNum, packet);
             }
-            while (start < data.length()) {
-                sendingBufferA.offer(data.substring(start, Math.min(start + MAXDATASIZE, data.length())));
-                start = Math.min(start + MAXDATASIZE, data.length());
+            else {
+                sendingBuffer.offer(packet);
             }
         }
-        storedInBuffer = sendingBufferA.size();
-    }
-
-    private void generateAndSend(String data) {
-        System.out.println("Sent packet: " + nextSeq);
-        int checkSum = getDataCheckSum(data, nextSeq);
-        Packet sendPacket = new Packet(nextSeq, 0, checkSum, data);
-        if (flyingBufferA.size() == 0) {
-            windowStart = nextSeq;
-            windowEnd = nextSeq;
-        }
-        else {
-            windowEnd = nextSeq;
-        }
-        flyingBufferA.add(sendPacket);
-        //if (timerOn) {
-            stopTimer(A);
-        //}
-        startTimer(A, RxmtInterval);
-        //timerOn = true;
-        toLayer3(A, sendPacket);
-        updateSeqNum();
-    }
-
-    private void updateSeqNum() {
-        nextSeq = (nextSeq + 1) % LimitSeqNo;
     }
 
     // This routine will be called whenever a packet sent from the B-side
@@ -200,53 +185,45 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // sent from the B-side.
     protected void aInput(Packet packet)
     {
-        ackReceivedA++;
-        int ackNum = packet.getAcknum(), checkSum = getDataCheckSum(packet.getPayload(), ackNum);
-        if (checkSum != packet.getChecksum() || flyingBufferA.isEmpty()) {
-            return;
-        }
-        System.out.println("Packet " + ackNum + " acked");
-        int firstUnackedSeq = flyingBufferA.get(0).getSeqnum();
-        if (ackNum == firstUnackedSeq) {
-            windowStart = (windowStart + 1) % LimitSeqNo;
-            flyingBufferA.remove(0);
-            stopTimer(A);
-            if (!flyingBufferA.isEmpty()) {
-                startTimer(A ,RxmtInterval);
-            }
-            //timerOn = false;
-        }
-        else {
-            reTransmitCntA++;
-            toLayer3(A, flyingBufferA.get(0));
-            //if (timerOn) {
-                stopTimer(A);
-            //}
-            startTimer(A, RxmtInterval);
-            //timerOn = true;
-        }
-        while (flyingBufferA.size() < WindowSize) {
-            if (!sendingBufferA.isEmpty()) {
-                origTransmitCntA++;
-                Packet newPacket = generatePacket(sendingBufferA.poll());
-                flyingBufferA.add(newPacket);
-                toLayer3(A, newPacket);
-                //if (timerOn) {
-                    stopTimer(A);
-                //}
-                startTimer(A, RxmtInterval);
-                //timerOn = true;
-            }
-            else {
-                break;
-            }
-        }
-    }
+        int checksum = packet.getChecksum();
+        int ackNum = packet.getAcknum();
 
-    public Packet generatePacket(String data) {
-        Packet newPacket = new Packet(nextSeq, 0, getDataCheckSum(data, nextSeq), data);
-        updateSeqNum();
-        return newPacket;
+        if (checkCheckSum(checksum, packet.getPayload())){
+
+            Set<Integer> seqNumbers = new HashSet<>(flyingBufferA.keySet());
+            for (int seqNum : seqNumbers) {
+                if (seqNum > ackNum) {
+                    break;
+                }
+                //sendWindowStart = seqNum + 1;
+                flyingBufferA.remove(seqNum);
+            }
+            //sendWindowStart = seqNumIt.hasNext() ? seqNumIt.next() : sendWindowStart;
+
+            while (flyingBufferA.size() < WindowSize && !sendingBuffer.isEmpty()) {
+                origTransmittedCntA++;
+                Packet retransPkt = sendingBuffer.poll();
+                if (timerOn) {
+                    stopTimer(A);
+                }
+                toLayer3(A, retransPkt);
+                startTimer(A, RxmtInterval);
+                timerOn = true;
+                flyingBufferA.put(retransPkt.getSeqnum(), retransPkt);
+            }
+        }
+        else{
+            if (!flyingBufferA.isEmpty()) {
+                retransmitNum++;
+                corruptedNum++;
+                if (timerOn) {
+                    stopTimer(A);
+                }
+                toLayer3(A, flyingBufferA.get(flyingBufferA.keySet().iterator().next()));
+                startTimer(A, RxmtInterval);
+                timerOn = true;
+            }
+        }
     }
 
     // This routine will be called when A's timer expires (thus generating a
@@ -255,13 +232,17 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // for how the timer is started and stopped.
     protected void aTimerInterrupt()
     {
-        timeOutCnt++;
-        System.out.println("time out!");
         stopTimer(A);
-        startTimer(A, RxmtInterval);
-        timerOn = true;
-        reTransmitCntA++;
-        toLayer3(A, flyingBufferA.get(0));
+        if (!flyingBufferA.isEmpty()) {
+            Packet retransmitPacket = flyingBufferA.get(flyingBufferA.keySet().iterator().next());
+            toLayer3(A, retransmitPacket);
+            retransmitNum++;
+            lostNum++;
+            startTimer(A, RxmtInterval);
+        }
+        else {
+            startTimer(A, RxmtInterval);
+        }
     }
 
     // This routine will be called once, before any of your other A-side
@@ -270,12 +251,10 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // of entity A).
     protected void aInit()
     {
-        flyingBufferA = new LinkedList<>();
-        sendingBufferA = new LinkedList<>();
+        //sendWindowStart = 0;
         nextSeq = FirstSeqNo;
-        windowStart = nextSeq - 1;
-        windowEnd = nextSeq - 1;
-        timerOn = false;
+        flyingBufferA = new LinkedHashMap<>();
+        sendingBuffer = new LinkedList<>();
     }
 
     // This routine will be called whenever a packet sent from the B-side
@@ -284,35 +263,35 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // sent from the A-side.
     protected void bInput(Packet packet)
     {
-        packetReceivedB++;
         int seqNum = packet.getSeqnum();
-        String data = packet.getPayload();
-        int checkSum = getDataCheckSum(data, seqNum);
-        if (checkSum != packet.getChecksum()) {
-            corruptedCnt++;
-            ackSentCntB++;
-            toLayer3(B, new Packet(0, (expectedSeq + LimitSeqNo - 1) % LimitSeqNo, getDataCheckSum("", (expectedSeq + LimitSeqNo - 1) % LimitSeqNo)));
-            return;
-        }
-        if (seqNum == expectedSeq) {
-            delieveredCntB++;
-            toLayer5(data);
-            System.out.println("Receive packet " + seqNum);
-            ackSentCntB++;
-            toLayer3(B, new Packet(0, seqNum, getDataCheckSum("", seqNum)));
-            expectedSeq = (expectedSeq + 1) % LimitSeqNo;
-            while (!receiveBufferB.isEmpty() && receiveBufferB.firstKey() == expectedSeq) {
-                delieveredCntB++;
-                toLayer5(receiveBufferB.get(expectedSeq).getData());
-                System.out.println("Receive packet " + expectedSeq);
-                ackSentCntB++;
-                toLayer3(B, new Packet(0, expectedSeq, getDataCheckSum("", seqNum)));
-                receiveBufferB.remove(expectedSeq);
-                expectedSeq = (expectedSeq + 1) % LimitSeqNo;
+        int checksum = packet.getChecksum();
+        String payload = packet.getPayload();
+        System.out.println("rcv packet seqnum: " + seqNum + ", expect " + expectedSeqNum);
+        if(checkCheckSum(checksum, packet.getPayload())){
+            if (expectedSeqNum > seqNum) {
+                Packet response = new Packet(seqNum, expectedSeqNum - 1, checksum, payload);
+                toLayer3(B,response);
+                ACK_B++;
+            }
+            else if (expectedSeqNum == seqNum) {
+                System.out.println("here");
+                rcvBufferB.put(seqNum, packet);
+                while(rcvBufferB.containsKey(expectedSeqNum)){
+                    toLayer5(rcvBufferB.get(expectedSeqNum).getPayload());
+                    delivered++;
+                    rcvBufferB.remove(expectedSeqNum);
+                    expectedSeqNum++;
+                }
+                Packet response = new Packet(seqNum, expectedSeqNum - 1, checksum, payload);
+                toLayer3(B,response);
+                ACK_B++;
+            }
+            else {
+                rcvBufferB.put(seqNum, packet);
             }
         }
-        else {
-            receiveBufferB.put(seqNum, new Message(data));
+        else{
+            corruptedNum++;
         }
     }
 
@@ -322,44 +301,39 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // of entity B).
     protected void bInit()
     {
-        receiveBufferB = new TreeMap<>();
-        expectedSeq = FirstSeqNo;
+        expectedSeqNum = FirstSeqNo;
+        rcvBufferB = new HashMap<>();
     }
 
-    //Stat Variables
-    int origTransmitCntA = 0, reTransmitCntA = 0, ackReceivedA;
-    int packetReceivedB, delieveredCntB = 0, ackSentCntB = 0;
-    int corruptedCnt = 0;
-    int timeOutCnt = 0;
-
-    //Debugging Variables
-    int receivedFromLayer5A = 0;
-    int storedInBuffer = 0;
-
+    private int receivedCntA = 0;
+    private int origTransmittedCntA = 0;
+    private int retransmitNum = 0;
+    private int delivered = 0;
+    private int ACK_B = 0;
+    private int corruptedNum = 0;
+    private int lostNum = 0;
     // Use to print final statistics
     protected void Simulation_done()
     {
         // TO PRINT THE STATISTICS, FILL IN THE DETAILS BY PUTTING VARIBALE NAMES. DO NOT CHANGE THE FORMAT OF PRINTED OUTPUT
         System.out.println("\n\n===============STATISTICS=======================");
-        System.out.println("Number of original packets transmitted by A:" + origTransmitCntA);
-        System.out.println("Number of retransmissions by A:" + reTransmitCntA);
-        System.out.println("Number of data packets delivered to layer 5 at B:" + delieveredCntB);
-        System.out.println("Number of ACK packets sent by B:" + ackSentCntB);
-        System.out.println("Number of corrupted packets:" + corruptedCnt);
-        System.out.println("Ratio of lost packets:" + (1 - (double)(ackReceivedA + packetReceivedB) / (origTransmitCntA + reTransmitCntA + ackSentCntB)));
-        System.out.println("Ratio of corrupted packets:" + (double)corruptedCnt / (origTransmitCntA + reTransmitCntA + ackSentCntB));
+        System.out.println("Number of original packets transmitted by A:" + origTransmittedCntA);
+        System.out.println("Number of retransmissions by A:" + retransmitNum);
+        System.out.println("Number of data packets delivered to layer 5 at B:" + delivered);
+        System.out.println("Number of ACK packets sent by B:" + ACK_B);
+        System.out.println("Number of corrupted packets:" + corruptedNum);
+        System.out.println("Ratio of lost packets:" + lostNum);
+        System.out.println("Ratio of corrupted packets:" + corruptedNum);
         System.out.println("Average RTT:" + "<YourVariableHere>");
         System.out.println("Average communication time:" + "<YourVariableHere>");
         System.out.println("==================================================");
 
         // PRINT YOUR OWN STATISTIC HERE TO CHECK THE CORRECTNESS OF YOUR PROGRAM
-        System.out.println("\nEXTRA:");
         // EXAMPLE GIVEN BELOW
         //System.out.println("Example statistic you want to check e.g. number of ACK packets received by A :" + "<YourVariableHere>");
-        System.out.println("Number of timeouts on A:" + timeOutCnt);
-        System.out.println("Number of packets received on A:" + receivedFromLayer5A);
-        System.out.println("Number of packets stored in sending buffer on A:" + storedInBuffer);
-        System.out.println("Number of packets received on B:" + packetReceivedB);
+        System.out.println("A received packet cnt: "+ receivedCntA);
+        System.out.println("Number of packets in sending buffer of A: " + sendingBuffer.size());
+        System.out.println("Number of packets in flying buffer of A: " + flyingBufferA.size());
+        System.out.println("Number of packets in rcv buffer of B: " + rcvBufferB.size());
     }
-
 }
