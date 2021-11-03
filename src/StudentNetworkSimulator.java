@@ -137,6 +137,7 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // the receiving upper layer.
     protected void aOutput(Message message)
     {
+        receivedFromLayer5A++;
         String data = message.getData();
         if (flyingBufferA.size() >= WindowSize) {
             sendingBufferA.offer(data);
@@ -160,7 +161,12 @@ public class StudentNetworkSimulator extends NetworkSimulator
                     }
                 }
             }
+            while (start < data.length()) {
+                sendingBufferA.offer(data.substring(start, Math.min(start + MAXDATASIZE, data.length())));
+                start = Math.min(start + MAXDATASIZE, data.length());
+            }
         }
+        storedInBuffer = sendingBufferA.size();
     }
 
     private void generateAndSend(String data) {
@@ -175,12 +181,16 @@ public class StudentNetworkSimulator extends NetworkSimulator
             windowEnd = nextSeq;
         }
         flyingBufferA.add(sendPacket);
-        if (timerOn) {
+        //if (timerOn) {
             stopTimer(A);
-        }
+        //}
         startTimer(A, RxmtInterval);
-        timerOn = true;
+        //timerOn = true;
         toLayer3(A, sendPacket);
+        updateSeqNum();
+    }
+
+    private void updateSeqNum() {
         nextSeq = (nextSeq + 1) % LimitSeqNo;
     }
 
@@ -198,15 +208,45 @@ public class StudentNetworkSimulator extends NetworkSimulator
         System.out.println("Packet " + ackNum + " acked");
         int firstUnackedSeq = flyingBufferA.get(0).getSeqnum();
         if (ackNum == firstUnackedSeq) {
-            windowStart = ackNum + 1;
+            windowStart = (windowStart + 1) % LimitSeqNo;
             flyingBufferA.remove(0);
             stopTimer(A);
-            timerOn = false;
+            if (!flyingBufferA.isEmpty()) {
+                startTimer(A ,RxmtInterval);
+            }
+            //timerOn = false;
         }
         else {
             reTransmitCntA++;
             toLayer3(A, flyingBufferA.get(0));
+            //if (timerOn) {
+                stopTimer(A);
+            //}
+            startTimer(A, RxmtInterval);
+            //timerOn = true;
         }
+        while (flyingBufferA.size() < WindowSize) {
+            if (!sendingBufferA.isEmpty()) {
+                origTransmitCntA++;
+                Packet newPacket = generatePacket(sendingBufferA.poll());
+                flyingBufferA.add(newPacket);
+                toLayer3(A, newPacket);
+                //if (timerOn) {
+                    stopTimer(A);
+                //}
+                startTimer(A, RxmtInterval);
+                //timerOn = true;
+            }
+            else {
+                break;
+            }
+        }
+    }
+
+    public Packet generatePacket(String data) {
+        Packet newPacket = new Packet(nextSeq, 0, getDataCheckSum(data, nextSeq), data);
+        updateSeqNum();
+        return newPacket;
     }
 
     // This routine will be called when A's timer expires (thus generating a
@@ -217,7 +257,7 @@ public class StudentNetworkSimulator extends NetworkSimulator
     {
         timeOutCnt++;
         System.out.println("time out!");
-        //stopTimer(A);
+        stopTimer(A);
         startTimer(A, RxmtInterval);
         timerOn = true;
         reTransmitCntA++;
@@ -292,6 +332,10 @@ public class StudentNetworkSimulator extends NetworkSimulator
     int corruptedCnt = 0;
     int timeOutCnt = 0;
 
+    //Debugging Variables
+    int receivedFromLayer5A = 0;
+    int storedInBuffer = 0;
+
     // Use to print final statistics
     protected void Simulation_done()
     {
@@ -313,6 +357,9 @@ public class StudentNetworkSimulator extends NetworkSimulator
         // EXAMPLE GIVEN BELOW
         //System.out.println("Example statistic you want to check e.g. number of ACK packets received by A :" + "<YourVariableHere>");
         System.out.println("Number of timeouts on A:" + timeOutCnt);
+        System.out.println("Number of packets received on A:" + receivedFromLayer5A);
+        System.out.println("Number of packets stored in sending buffer on A:" + storedInBuffer);
+        System.out.println("Number of packets received on B:" + packetReceivedB);
     }
 
 }
